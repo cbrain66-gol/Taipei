@@ -13,47 +13,41 @@ def get_today_str():
     tz = timezone(timedelta(hours=8))
     return datetime.now(tz).strftime('%Y-%m-%d')
 
-def get_available_model(api_key):
-    """自動向 Google API 查詢此金鑰支援的模型清單，徹底避免 404 錯誤"""
+def get_candidate_models(api_key):
+    """取得可用模型清單，最優先使用官方指定的 gemini-3.8-flash 並依版本由新到舊排序"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     req = urllib.request.Request(url)
+    candidates = []
     try:
         with urllib.request.urlopen(req) as resp:
             data = json.loads(resp.read().decode('utf-8'))
-    except urllib.error.HTTPError as e:
-        print(f"無法取得模型清單 (HTTP {e.code}): {e.read().decode('utf-8')}")
-        sys.exit(1)
+        for m in data.get('models', []):
+            name = m.get('name', '')
+            methods = m.get('supportedGenerationMethods', [])
+            if 'generateContent' in methods and 'gemini' in name.lower():
+                if any(x in name.lower() for x in ['embedding', 'imagen', 'veo', 'vision', 'audio', 'tts', 'aqa', 'bisect']):
+                    continue
+                candidates.append(name)
+    except Exception as e:
+        print(f"查詢模型清單提醒: {e}")
 
-    models = data.get('models', [])
-    candidates = []
-    for m in models:
-        name = m.get('name', '')
-        methods = m.get('supportedGenerationMethods', [])
-        if 'generateContent' in methods and 'gemini' in name.lower():
-            if any(x in name.lower() for x in ['embedding', 'imagen', 'veo', 'vision', 'audio', 'tts', 'aqa', 'bisect']):
-                continue
-            candidates.append(name)
+    # 依版本號由新到舊排序
+    candidates.sort(reverse=True)
 
-    if not candidates:
-        print("找不到任何支援 generateContent 的 Gemini 模型。")
-        sys.exit(1)
-
-    preferred_order = [
-        'models/gemini-2.5-flash',
-        'models/gemini-2.0-flash',
+    # 將 Google 官方指定給新用戶的最新模型排在最優先
+    priority = [
+        'models/gemini-3.8-flash',
         'models/gemini-flash-latest',
-        'models/gemini-2.5-pro',
-        'models/gemini-2.0-pro',
         'models/gemini-pro-latest',
     ]
-    for pref in preferred_order:
-        for c in candidates:
-            if c == pref or c.startswith(pref):
-                print(f"自動選用模型: {c}")
-                return c
-
-    print(f"自動選用模型: {candidates[0]}")
-    return candidates[0]
+    ordered = []
+    for p in priority:
+        if p not in ordered:
+            ordered.append(p)
+    for c in candidates:
+        if c not in ordered:
+            ordered.append(c)
+    return ordered
 
 def fetch_google_news_rss():
     """從 Google News 台灣版抓取最新『蔣萬安 沈伯洋』新聞作為輔助資料"""
@@ -74,9 +68,7 @@ def fetch_google_news_rss():
         print(f"RSS 新聞抓取略過: {e}")
     return "\n".join(news_items)
 
-def query_gemini(api_key, model_name, recent_context, news_feed, today_date):
-    url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={api_key}"
-    
+def query_gemini(api_key, model_list, recent_context, news_feed, today_date):
     prompt = f"""你是一個客觀公正的政治新聞研究編輯。
 請針對「2026年台北市長選舉」，根據過去24小時內（今天日期為 {today_date}）「蔣萬安陣營」與「沈伯洋陣營」的最新重點攻防新聞（包括市政交鋒、政策質疑、公開回應、辯論、造勢等）進行整理。
 
@@ -108,35 +100,42 @@ def query_gemini(api_key, model_name, recent_context, news_feed, today_date):
 
 請只輸出 HTML 代碼或 NO_UPDATE，不要包含任何開頭或結尾的 markdown 標籤（如 ```html），也不要有任何多餘說明。"""
 
-    # 先嘗試開啟 google_search 工具；若該模型或免費額度不支援則自動切換為純內容生成
-    for use_search_tool in [True, False]:
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}]
-        }
-        if use_search_tool:
-            payload["tools"] = [{"google_search": {}}]
-
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode('utf-8'),
-            headers={'Content-Type': 'application/json'}
-        )
-        try:
-            with urllib.request.urlopen(req) as resp:
-                data = json.loads(resp.read().decode('utf-8'))
-            candidates = data.get('candidates', [])
-            if not candidates:
-                return None
-            content = candidates[0].get('content', {}).get('parts', [])
-            return "".join([p.get('text', '') for p in content]).strip()
-        except urllib.error.HTTPError as e:
-            err_text = e.read().decode('utf-8')
+    for model_name in model_list:
+        url = f"[https://generativelanguage.googleapis.com/v1beta/](https://generativelanguage.googleapis.com/v1beta/){model_name}:generateContent?key={api_key}"
+        for use_search_tool in [True, False]:
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
             if use_search_tool:
-                print(f"Search tool 模式不支援 (HTTP {e.code})，自動切換為標準模式...")
-                continue
-            else:
-                print(f"Gemini API 請求失敗 (HTTP {e.code}): {err_text}")
-                sys.exit(1)
+                payload["tools"] = [{"google_search": {}}]
+
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
+            )
+            try:
+                with urllib.request.urlopen(req) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                candidates = data.get('candidates', [])
+                if candidates:
+                    content = candidates[0].get('content', {}).get('parts', [])
+                    text = "".join([p.get('text', '') for p in content]).strip()
+                    if text:
+                        print(f"成功使用模型 {model_name} (search={use_search_tool}) 完成生成！")
+                        return text
+            except urllib.error.HTTPError as e:
+                err_text = e.read().decode('utf-8')
+                if e.code == 404 or "no longer available" in err_text:
+                    print(f"模型 {model_name} 無法使用，自動切換下一個模型...")
+                    break
+                elif use_search_tool:
+                    print(f"模型 {model_name} 不支援 search tool (HTTP {e.code})，改用標準模式...")
+                    continue
+                else:
+                    print(f"模型 {model_name} 請求失敗 (HTTP {e.code}): {err_text}")
+                    break
+
+    print("所有候選模型皆無法完成請求。")
+    sys.exit(1)
 
 def main():
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -152,46 +151,4 @@ def main():
     with open(html_file, 'r', encoding='utf-8') as f:
         html_content = f.read()
         
-    events = re.findall(r'<time>(.*?)</time><h3>(.*?)</h3>', html_content)
-    recent_events = events[-6:] if len(events) >= 6 else events
-    recent_context = "\n".join([f"- {date}: {title}" for date, title in recent_events])
-    
-    today_date = get_today_str()
-    print(f"Checking updates for {today_date}...")
-    
-    model_name = get_available_model(api_key)
-    news_feed = fetch_google_news_rss()
-    
-    result = query_gemini(api_key, model_name, recent_context, news_feed, today_date)
-    if not result or "NO_UPDATE" in result:
-        print("No new major campaign events today. index.html remains unchanged.")
-        return
-        
-    cleaned_result = re.sub(r'^```html\s*', '', result, flags=re.IGNORECASE)
-    cleaned_result = re.sub(r'^```\s*', '', cleaned_result)
-    cleaned_result = re.sub(r'```$', '', cleaned_result).strip()
-    
-    if '<div class="row">' not in cleaned_result:
-        print("Generated output did not contain valid row format.")
-        return
-        
-    target = '</div></div>\n <div class="note">'
-    replacement = f'    </div>{cleaned_result}\n    </div></div>\n <div class="note">'
-    
-    if target in html_content:
-        new_html = html_content.replace(target, replacement)
-    else:
-        target_alt = '</div></div>\n  <div class="note">'
-        if target_alt in html_content:
-            new_html = html_content.replace(target_alt, replacement)
-        else:
-            print("Could not locate insertion anchor in index.html.")
-            return
-
-    with open(html_file, 'w', encoding='utf-8') as f:
-        f.write(new_html)
-        
-    print(f"Successfully updated {html_file} with new events for {today_date}!")
-
-if __name__ == "__main__":
-    main()
+    events = re.findall(r'<time>(.*?)</time><h3>(.*?)
