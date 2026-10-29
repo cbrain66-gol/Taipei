@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import urllib.request
+import urllib.error
 import re
 from datetime import datetime, timezone, timedelta
 
@@ -11,7 +12,8 @@ def get_today_str():
     return datetime.now(tz).strftime('%Y-%m-%d')
 
 def query_gemini_with_search(api_key, recent_context, today_date):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    # 使用 Google 官方穩定的 gemini-1.5-flash 模型
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
     
     prompt = f"""你是一個客觀公正的政治新聞研究編輯。
 請針對「2026年台北市長選舉」，搜尋過去24小時內（今天日期為 {today_date}）「蔣萬安陣營」與「沈伯洋陣營」的最新重點攻防新聞（包括市政交鋒、政策質疑、公開回應、辯論、造勢等）。
@@ -52,8 +54,13 @@ def query_gemini_with_search(api_key, recent_context, today_date):
         headers={'Content-Type': 'application/json'}
     )
     
-    with urllib.request.urlopen(req) as resp:
-        data = json.loads(resp.read().decode('utf-8'))
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode('utf-8')
+        print(f"Gemini API 請求失敗 (HTTP {e.code}): {error_body}")
+        sys.exit(1)
         
     candidates = data.get('candidates', [])
     if not candidates:
